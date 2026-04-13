@@ -47,7 +47,7 @@ Set the same value as `MAIL_SERVICE_SECRET` in CentralHub's Vercel environment v
 ### 4. Deploy to Railway
 
 1. Push this repo to GitHub (`a-perdana/eduversal-mail-service`)
-2. New Railway project → Deploy from GitHub repo
+2. New Railway project → Deploy from GitHub repo (`a-perdana/Mail-Service`)
 3. Add environment variables above
 4. Railway auto-detects Node.js, runs `npm start`
 
