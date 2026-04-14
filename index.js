@@ -319,63 +319,70 @@ app.post('/send-campaign', requireAuth, async (req, res) => {
   if (!db) return res.status(500).json({ error: 'Firebase not initialised' });
 
   const { subject, bodyHtml, schoolIds = [], campaignName, sentBy,
-          platform, role = 'all', subRole, excludedEmails = [] } = req.body;
+          platform, role = 'all', subRole, excludedEmails = [],
+          recipientEmails } = req.body;
 
   // Validate
   if (!subject || !subject.trim())   return res.status(400).json({ error: 'subject is required' });
   if (!bodyHtml || !bodyHtml.trim()) return res.status(400).json({ error: 'bodyHtml is required' });
 
-  // ── 1. Collect recipients (mirrors /recipients logic) ──────────
-  let usersQuery    = db.collection('users');
-  let contactsQuery = db.collection('teacher_contacts');
+  // ── 1. Collect recipients ──────────────────────────────────────
+  let recipients;
 
-  if (platform && PLATFORM_CONFIG[platform]) {
-    const cfg = PLATFORM_CONFIG[platform];
-    if (role === 'admin') {
-      usersQuery = usersQuery.where(cfg.roleField, '==', cfg.adminVal);
-    } else if (role === 'user') {
-      usersQuery = usersQuery.where(cfg.roleField, '==', cfg.userVal);
-    } else {
-      usersQuery = usersQuery.where(cfg.roleField, 'in', [cfg.userVal, cfg.adminVal]);
-    }
+  if (Array.isArray(recipientEmails) && recipientEmails.length > 0) {
+    // Explicit list provided by client (new two-source architecture)
+    recipients = recipientEmails
+      .filter(e => typeof e === 'string' && e.includes('@'))
+      .map(e => ({ email: e, name: '' }));
   } else {
-    // Default: all teachers hub users
-    usersQuery = usersQuery.where('role_teachershub', 'in', ['teachers_user', 'teachers_admin']);
-  }
+    // Legacy: derive recipients from server-side filter
+    let usersQuery    = db.collection('users');
+    let contactsQuery = db.collection('teacher_contacts');
 
-  if (schoolIds.length > 0) {
-    usersQuery    = usersQuery.where('schoolId', 'in', schoolIds.slice(0, 30));
-    contactsQuery = contactsQuery.where('schoolId', 'in', schoolIds.slice(0, 30));
-  }
-
-  const [usersSnap, contactsSnap] = await Promise.all([
-    usersQuery.get(),
-    contactsQuery.get(),
-  ]);
-
-  const excluded = new Set(excludedEmails.map(e => e.toLowerCase()));
-
-  const map = new Map();
-  usersSnap.docs.forEach(d => {
-    const u = d.data();
-    if (!u.email) return;
-    if (excluded.has(u.email.toLowerCase())) return;
-    // Sub-role filter
-    if (subRole && platform && PLATFORM_CONFIG[platform].subRoleField) {
-      const userSubRoles = u[PLATFORM_CONFIG[platform].subRoleField] || [];
-      if (!userSubRoles.includes(subRole)) return;
+    if (platform && PLATFORM_CONFIG[platform]) {
+      const cfg = PLATFORM_CONFIG[platform];
+      if (role === 'admin') {
+        usersQuery = usersQuery.where(cfg.roleField, '==', cfg.adminVal);
+      } else if (role === 'user') {
+        usersQuery = usersQuery.where(cfg.roleField, '==', cfg.userVal);
+      } else {
+        usersQuery = usersQuery.where(cfg.roleField, 'in', [cfg.userVal, cfg.adminVal]);
+      }
+    } else {
+      usersQuery = usersQuery.where('role_teachershub', 'in', ['teachers_user', 'teachers_admin']);
     }
-    map.set(u.email.toLowerCase(), { email: u.email, name: u.displayName || '' });
-  });
-  contactsSnap.docs.forEach(d => {
-    const c = d.data();
-    if (!c.email) return;
-    const key = c.email.toLowerCase();
-    if (excluded.has(key)) return;
-    if (!map.has(key)) map.set(key, { email: c.email, name: c.name || '' });
-  });
 
-  const recipients = Array.from(map.values());
+    if (schoolIds.length > 0) {
+      usersQuery    = usersQuery.where('schoolId', 'in', schoolIds.slice(0, 30));
+      contactsQuery = contactsQuery.where('schoolId', 'in', schoolIds.slice(0, 30));
+    }
+
+    const [usersSnap, contactsSnap] = await Promise.all([
+      usersQuery.get(),
+      contactsQuery.get(),
+    ]);
+
+    const excluded = new Set(excludedEmails.map(e => e.toLowerCase()));
+    const map = new Map();
+    usersSnap.docs.forEach(d => {
+      const u = d.data();
+      if (!u.email) return;
+      if (excluded.has(u.email.toLowerCase())) return;
+      if (subRole && platform && PLATFORM_CONFIG[platform].subRoleField) {
+        const userSubRoles = u[PLATFORM_CONFIG[platform].subRoleField] || [];
+        if (!userSubRoles.includes(subRole)) return;
+      }
+      map.set(u.email.toLowerCase(), { email: u.email, name: u.displayName || '' });
+    });
+    contactsSnap.docs.forEach(d => {
+      const c = d.data();
+      if (!c.email) return;
+      const key = c.email.toLowerCase();
+      if (excluded.has(key)) return;
+      if (!map.has(key)) map.set(key, { email: c.email, name: c.name || '' });
+    });
+    recipients = Array.from(map.values());
+  }
 
   if (recipients.length === 0) {
     return res.status(400).json({ error: 'No recipients found for the selected filter' });
