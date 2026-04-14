@@ -135,43 +135,85 @@ app.get('/health', (_req, res) => {
 });
 
 /* ================================================================
+   PLATFORM CONFIG
+   ================================================================ */
+const PLATFORM_CONFIG = {
+  centralhub:  { roleField: 'role_centralhub',  subRoleField: 'ch_sub_roles', userVal: 'central_user',   adminVal: 'central_admin'   },
+  academichub: { roleField: 'role_academichub', subRoleField: 'ah_sub_roles', userVal: 'academic_user',  adminVal: 'academic_admin'  },
+  teachershub: { roleField: 'role_teachershub', subRoleField: 'th_sub_roles', userVal: 'teachers_user',  adminVal: 'teachers_admin'  },
+  researchhub: { roleField: 'role_researchhub', subRoleField: null,           userVal: 'research_user',  adminVal: 'research_admin'  },
+};
+
+/* ================================================================
    GET /recipients
-   Returns the merged recipient list:
-     - registered teachers (users with role_teachershub)
-     - manual contacts (teacher_contacts collection)
-   Optionally filtered by schoolId query param.
+   Query params (all optional — no params = all registered users):
+     platform  = centralhub | academichub | teachershub | researchhub
+     role      = user | admin | all  (default: all)
+     subRole   = e.g. subject_teacher, school_principal …
+     schoolId  = Firestore schools doc ID
+   Also includes manual contacts from teacher_contacts collection.
    ================================================================ */
 app.get('/recipients', requireAuth, async (req, res) => {
   if (!db) return res.status(500).json({ error: 'Firebase not initialised' });
 
   try {
-    const { schoolId } = req.query;
+    const { platform, role = 'all', subRole, schoolId } = req.query;
 
-    // 1. Registered teachers from users collection
-    let usersQuery = db.collection('users')
-      .where('role_teachershub', 'in', ['teachers_user', 'teachers_admin']);
-    if (schoolId) usersQuery = usersQuery.where('schoolId', '==', schoolId);
-
-    // 2. Manual contacts from teacher_contacts collection
-    let contactsQuery = db.collection('teacher_contacts');
-    if (schoolId) contactsQuery = contactsQuery.where('schoolId', '==', schoolId);
-
-    // 3. School name lookup
+    // School name lookup
     const schoolsSnap = await db.collection('schools').get();
     const schoolNameMap = {};
     schoolsSnap.docs.forEach(d => { schoolNameMap[d.id] = d.data().name || d.id; });
+
+    // Build users query
+    let usersQuery = db.collection('users');
+
+    if (platform && PLATFORM_CONFIG[platform]) {
+      const cfg = PLATFORM_CONFIG[platform];
+      if (role === 'admin') {
+        usersQuery = usersQuery.where(cfg.roleField, '==', cfg.adminVal);
+      } else if (role === 'user') {
+        usersQuery = usersQuery.where(cfg.roleField, '==', cfg.userVal);
+      } else {
+        // all = both user and admin
+        usersQuery = usersQuery.where(cfg.roleField, 'in', [cfg.userVal, cfg.adminVal]);
+      }
+    } else {
+      // No platform filter — return everyone who has any platform role
+      // (fetch all, filter in JS to avoid composite index requirement)
+    }
+
+    if (schoolId) usersQuery = usersQuery.where('schoolId', '==', schoolId);
+
+    // Manual contacts
+    let contactsQuery = db.collection('teacher_contacts');
+    if (schoolId) contactsQuery = contactsQuery.where('schoolId', '==', schoolId);
 
     const [usersSnap, contactsSnap] = await Promise.all([
       usersQuery.get(),
       contactsQuery.get(),
     ]);
 
-    // Build de-duped map (email → recipient)
+    // Build de-duped map
     const map = new Map();
 
     usersSnap.docs.forEach(d => {
       const u = d.data();
       if (!u.email) return;
+
+      // No platform filter: skip users with no platform role at all
+      if (!platform) {
+        const hasAnyRole = ['role_centralhub','role_academichub','role_teachershub','role_researchhub']
+          .some(f => u[f]);
+        if (!hasAnyRole) return;
+      }
+
+      // Sub-role filter (JS-side — Firestore array-contains only supports one value)
+      if (subRole && platform) {
+        const cfg = PLATFORM_CONFIG[platform];
+        const userSubRoles = cfg.subRoleField ? (u[cfg.subRoleField] || []) : [];
+        if (!userSubRoles.includes(subRole)) return;
+      }
+
       map.set(u.email.toLowerCase(), {
         email:      u.email,
         name:       u.displayName || '',
@@ -276,18 +318,32 @@ app.get('/schools', requireAuth, async (req, res) => {
 app.post('/send-campaign', requireAuth, async (req, res) => {
   if (!db) return res.status(500).json({ error: 'Firebase not initialised' });
 
-  const { subject, bodyHtml, schoolIds = [], campaignName, sentBy } = req.body;
+  const { subject, bodyHtml, schoolIds = [], campaignName, sentBy,
+          platform, role = 'all', subRole, excludedEmails = [] } = req.body;
 
   // Validate
   if (!subject || !subject.trim())   return res.status(400).json({ error: 'subject is required' });
   if (!bodyHtml || !bodyHtml.trim()) return res.status(400).json({ error: 'bodyHtml is required' });
 
-  // ── 1. Collect recipients ──────────────────────────────────────
-  let usersQuery    = db.collection('users').where('role_teachershub', 'in', ['teachers_user', 'teachers_admin']);
+  // ── 1. Collect recipients (mirrors /recipients logic) ──────────
+  let usersQuery    = db.collection('users');
   let contactsQuery = db.collection('teacher_contacts');
 
+  if (platform && PLATFORM_CONFIG[platform]) {
+    const cfg = PLATFORM_CONFIG[platform];
+    if (role === 'admin') {
+      usersQuery = usersQuery.where(cfg.roleField, '==', cfg.adminVal);
+    } else if (role === 'user') {
+      usersQuery = usersQuery.where(cfg.roleField, '==', cfg.userVal);
+    } else {
+      usersQuery = usersQuery.where(cfg.roleField, 'in', [cfg.userVal, cfg.adminVal]);
+    }
+  } else {
+    // Default: all teachers hub users
+    usersQuery = usersQuery.where('role_teachershub', 'in', ['teachers_user', 'teachers_admin']);
+  }
+
   if (schoolIds.length > 0) {
-    // Firestore 'in' supports up to 30 values
     usersQuery    = usersQuery.where('schoolId', 'in', schoolIds.slice(0, 30));
     contactsQuery = contactsQuery.where('schoolId', 'in', schoolIds.slice(0, 30));
   }
@@ -297,23 +353,32 @@ app.post('/send-campaign', requireAuth, async (req, res) => {
     contactsQuery.get(),
   ]);
 
+  const excluded = new Set(excludedEmails.map(e => e.toLowerCase()));
+
   const map = new Map();
   usersSnap.docs.forEach(d => {
     const u = d.data();
     if (!u.email) return;
+    if (excluded.has(u.email.toLowerCase())) return;
+    // Sub-role filter
+    if (subRole && platform && PLATFORM_CONFIG[platform].subRoleField) {
+      const userSubRoles = u[PLATFORM_CONFIG[platform].subRoleField] || [];
+      if (!userSubRoles.includes(subRole)) return;
+    }
     map.set(u.email.toLowerCase(), { email: u.email, name: u.displayName || '' });
   });
   contactsSnap.docs.forEach(d => {
     const c = d.data();
     if (!c.email) return;
     const key = c.email.toLowerCase();
+    if (excluded.has(key)) return;
     if (!map.has(key)) map.set(key, { email: c.email, name: c.name || '' });
   });
 
   const recipients = Array.from(map.values());
 
   if (recipients.length === 0) {
-    return res.status(400).json({ error: 'No recipients found for the selected schools' });
+    return res.status(400).json({ error: 'No recipients found for the selected filter' });
   }
 
   // ── 2. Create campaign record in Firestore ─────────────────────
@@ -323,6 +388,9 @@ app.post('/send-campaign', requireAuth, async (req, res) => {
     subject,
     bodyHtml,
     schoolIds,
+    platform:       platform || null,
+    role:           role     || null,
+    subRole:        subRole  || null,
     sentBy:         sentBy || '',
     recipientCount: recipients.length,
     sentCount:      0,
