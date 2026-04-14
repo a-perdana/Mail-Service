@@ -156,6 +156,11 @@ app.get('/recipients', requireAuth, async (req, res) => {
     let contactsQuery = db.collection('teacher_contacts');
     if (schoolId) contactsQuery = contactsQuery.where('schoolId', '==', schoolId);
 
+    // 3. School name lookup
+    const schoolsSnap = await db.collection('schools').get();
+    const schoolNameMap = {};
+    schoolsSnap.docs.forEach(d => { schoolNameMap[d.id] = d.data().name || d.id; });
+
     const [usersSnap, contactsSnap] = await Promise.all([
       usersQuery.get(),
       contactsQuery.get(),
@@ -171,7 +176,7 @@ app.get('/recipients', requireAuth, async (req, res) => {
         email:      u.email,
         name:       u.displayName || '',
         schoolId:   u.schoolId   || '',
-        schoolName: u.school     || '',
+        schoolName: schoolNameMap[u.schoolId] || u.school || '',
         source:     'registered',
       });
     });
@@ -208,11 +213,47 @@ app.get('/schools', requireAuth, async (req, res) => {
   if (!db) return res.status(500).json({ error: 'Firebase not initialised' });
 
   try {
-    const schoolsSnap = await db.collection('schools').get();
-    const schools = schoolsSnap.docs.map(d => ({
-      id:   d.id,
-      name: d.data().name || d.id,
-    })).sort((a, b) => a.name.localeCompare(b.name));
+    // Build school list from actual schoolId values in users + teacher_contacts
+    // so that schoolId filter in /recipients always matches
+    const [usersSnap, contactsSnap, schoolsSnap] = await Promise.all([
+      db.collection('users').where('role_teachershub', 'in', ['teachers_user', 'teachers_admin']).get(),
+      db.collection('teacher_contacts').get(),
+      db.collection('schools').get(),
+    ]);
+
+    // schoolId → schoolName lookup from schools collection
+    const schoolNameMap = {};
+    schoolsSnap.docs.forEach(d => {
+      schoolNameMap[d.id] = d.data().name || d.id;
+    });
+
+    // Collect unique schoolIds that actually have recipients
+    const schoolMap = new Map();
+    usersSnap.docs.forEach(d => {
+      const { schoolId, school } = d.data();
+      if (!schoolId) return;
+      if (!schoolMap.has(schoolId)) {
+        schoolMap.set(schoolId, schoolNameMap[schoolId] || school || schoolId);
+      }
+    });
+    contactsSnap.docs.forEach(d => {
+      const { schoolId, schoolName } = d.data();
+      if (!schoolId) return;
+      if (!schoolMap.has(schoolId)) {
+        schoolMap.set(schoolId, schoolNameMap[schoolId] || schoolName || schoolId);
+      }
+    });
+
+    // Also include schools from the schools collection (even if no recipients yet)
+    schoolsSnap.docs.forEach(d => {
+      if (!schoolMap.has(d.id)) {
+        schoolMap.set(d.id, d.data().name || d.id);
+      }
+    });
+
+    const schools = Array.from(schoolMap.entries())
+      .map(([id, name]) => ({ id, name }))
+      .sort((a, b) => a.name.localeCompare(b.name));
 
     res.json({ schools });
   } catch (err) {
