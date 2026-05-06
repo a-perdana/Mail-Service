@@ -592,40 +592,55 @@ app.post('/send-campaign', requireAuth, async (req, res) => {
 
       try {
         const result  = await resend.batch.send(emails);
-        // SDK v6 returns { data: { data: [{id},...] } | [{id},...], error }; surface API errors as throws
-        // so the per-recipient log marks the batch as failed instead of silently logging 'sent' with null IDs.
-        if (result?.error) throw new Error(result.error.message || 'Resend batch error');
-        // Resend SDK has shipped a few different response shapes over versions:
-        //   v0.x → { data: [{id}, ...] }
-        //   v2.x → { data: { data: [{id}, ...] }, error: null }
-        //   v6.x → { data: [{id}, ...], error: null }
-        // Normalise all so resendId logging works regardless.
+        // Always log the full response shape so Railway has a forensic
+        // record of what Resend actually returned. Past incident
+        // 2026-05-06: a batch returned no IDs and no .error, but the
+        // service logged 38/38 'sent' anyway because the absent-IDs
+        // branch was a console.warn instead of a throw.
+        console.log('[send-campaign] Resend batch.send response:',
+          JSON.stringify(result).slice(0, 800));
+
+        // SDK v6 returns { data: [{id},...], error }. v0/v2 had
+        // different shapes; normalise all so resendId logging works.
+        if (result?.error) {
+          throw new Error(result.error.message || JSON.stringify(result.error) || 'Resend batch error');
+        }
         const idsArr  = Array.isArray(result?.data)
           ? result.data
           : Array.isArray(result?.data?.data)
             ? result.data.data
             : [];
-        // Surface a structured log entry so Railway logs make any future
-        // ID-mapping mismatch obvious without needing to redeploy.
+
+        // If Resend returned 200 but no IDs, the batch did NOT actually
+        // send. Treat this as a hard failure — never log 'sent' with
+        // null IDs (those mails are silently lost).
+        if (idsArr.length === 0) {
+          throw new Error(
+            `Resend batch returned no IDs for ${batch.length} recipients. ` +
+            `Likely cause: rate limit, domain warm-up, or SDK shape change. ` +
+            `Raw response: ${JSON.stringify(result).slice(0, 400)}`
+          );
+        }
         if (idsArr.length !== batch.length) {
+          // Partial response — log + treat extras as fail so we never
+          // claim a 'sent' status without a real Resend ID behind it.
           console.warn('[send-campaign] Resend batch returned',
-            idsArr.length, 'IDs for', batch.length, 'recipients — response shape:',
-            JSON.stringify(result).slice(0, 400));
+            idsArr.length, 'IDs for', batch.length, 'recipients — partial');
         }
         for (let i = 0; i < batch.length; i++) {
           const r  = batch[i];
           const id = idsArr[i]?.id || null;
-          recipientLog.push({
-            email:  r.email,
-            name:   r.name || '',
-            status: 'sent',
-            resendId: id,
-          });
+          if (id) {
+            recipientLog.push({ email: r.email, name: r.name || '', status: 'sent', resendId: id });
+            sentCount += 1;
+          } else {
+            recipientLog.push({ email: r.email, name: r.name || '', status: 'failed', error: 'No Resend ID returned for this recipient' });
+            failedCount += 1;
+          }
         }
-        sentCount += batch.length;
       } catch (batchErr) {
         const errMsg = batchErr?.message || 'Batch send error';
-        console.error('Batch send error:', errMsg);
+        console.error('[send-campaign] Batch send error:', errMsg);
         for (const r of batch) {
           recipientLog.push({
             email:  r.email,
