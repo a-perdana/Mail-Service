@@ -88,6 +88,25 @@ function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
 
+// HTML-escape merge tag values so a `<` in a password can't break out of an attribute / inject markup.
+function escapeHtmlValue(s) {
+  return String(s).replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+// Substitute {{key}} (with optional whitespace) in `template` with vars[key].
+// `escape` controls HTML-escaping: true for HTML body, false for plain-text subject.
+// Missing keys render as empty string — safer than leaking the literal `{{password}}` to recipients.
+function applyMergeTags(template, vars, { escape = true } = {}) {
+  if (!template || !vars) return template || '';
+  return template.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_, key) => {
+    const v = vars[key];
+    if (v == null) return '';
+    return escape ? escapeHtmlValue(v) : String(v);
+  });
+}
+
 /**
  * Build the HTML wrapper around the rich-editor body.
  * Adds a branded header, footer with unsubscribe placeholder.
@@ -422,11 +441,18 @@ app.post('/send-campaign', requireAuth, async (req, res) => {
 
   const { subject, bodyHtml, schoolIds = [], campaignName, sentBy,
           platform, role = 'all', subRole, excludedEmails = [],
-          recipientEmails } = req.body;
+          recipientEmails, personalizations } = req.body;
 
   // Validate
   if (!subject || !subject.trim())   return res.status(400).json({ error: 'subject is required' });
   if (!bodyHtml || !bodyHtml.trim()) return res.status(400).json({ error: 'bodyHtml is required' });
+
+  // Personalization map: { [emailLower]: { [tag]: value } } — values substituted into {{tag}} in subject + body.
+  // Field names recorded on the campaign doc; values are NEVER persisted (sensitive — passwords etc).
+  const perMap = (personalizations && typeof personalizations === 'object') ? personalizations : null;
+  const personalizationFields = perMap
+    ? Array.from(new Set(Object.values(perMap).flatMap(v => v ? Object.keys(v) : []))).sort()
+    : [];
 
   // ── 1. Collect recipients ──────────────────────────────────────
   let recipients;
@@ -506,6 +532,9 @@ app.post('/send-campaign', requireAuth, async (req, res) => {
     failedCount:    0,
     status:         'sending',
     createdAt:      admin.firestore.FieldValue.serverTimestamp(),
+    // Field NAMES only — values would expose passwords / tokens in Firestore.
+    personalizationFields,
+    isPersonalized: personalizationFields.length > 0,
   });
 
   // ── 3. Send in batches of 50 (Resend batch limit) ──────────────
@@ -518,19 +547,34 @@ app.post('/send-campaign', requireAuth, async (req, res) => {
 
   // Background sending
   (async () => {
-    const html      = buildEmailHtml(subject, bodyHtml, campaignRef.id);
+    // Pre-build the non-personalized HTML once; per-recipient path re-renders inside the loop.
+    const baseHtml  = perMap ? null : buildEmailHtml(subject, bodyHtml, campaignRef.id);
     const batches   = chunk(recipients, 50);
     let sentCount   = 0;
     let failedCount = 0;
 
     for (const batch of batches) {
       try {
-        const emails = batch.map(r => ({
-          from:    FROM,
-          to:      r.name ? `${r.name} <${r.email}>` : r.email,
-          subject,
-          html,
-        }));
+        const emails = batch.map(r => {
+          let renderedSubject = subject;
+          let renderedHtml    = baseHtml;
+          if (perMap) {
+            const vars = perMap[r.email.toLowerCase()] || null;
+            // Per-recipient: substitute into subject (plain) + body (HTML-escape values), then wrap.
+            renderedSubject = applyMergeTags(subject,  vars, { escape: false });
+            renderedHtml    = buildEmailHtml(
+              renderedSubject,
+              applyMergeTags(bodyHtml, vars, { escape: true }),
+              campaignRef.id
+            );
+          }
+          return {
+            from:    FROM,
+            to:      r.name ? `${r.name} <${r.email}>` : r.email,
+            subject: renderedSubject,
+            html:    renderedHtml,
+          };
+        });
 
         const result = await resend.batch.send(emails);
 
@@ -570,14 +614,19 @@ app.post('/send-campaign', requireAuth, async (req, res) => {
    Body: { subject, bodyHtml, toEmail }
    ================================================================ */
 app.post('/send-test', requireAuth, async (req, res) => {
-  const { subject, bodyHtml, toEmail } = req.body;
+  const { subject, bodyHtml, toEmail, previewVars } = req.body;
   if (!subject || !bodyHtml || !toEmail) {
     return res.status(400).json({ error: 'subject, bodyHtml, toEmail are required' });
   }
 
   try {
-    const html = buildEmailHtml(subject, bodyHtml, 'test');
-    await resend.emails.send({ from: FROM, to: toEmail, subject: `[TEST] ${subject}`, html });
+    // If admin passed previewVars (sample row from a CSV import), render merge tags
+    // so the test email reflects what real recipients will receive.
+    const hasVars = previewVars && typeof previewVars === 'object' && Object.keys(previewVars).length > 0;
+    const renderedSubject = hasVars ? applyMergeTags(subject,  previewVars, { escape: false }) : subject;
+    const renderedBody    = hasVars ? applyMergeTags(bodyHtml, previewVars, { escape: true })  : bodyHtml;
+    const html = buildEmailHtml(renderedSubject, renderedBody, 'test');
+    await resend.emails.send({ from: FROM, to: toEmail, subject: `[TEST] ${renderedSubject}`, html });
     res.json({ ok: true, message: `Test email sent to ${toEmail}` });
   } catch (err) {
     console.error('/send-test error:', err);
