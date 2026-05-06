@@ -592,10 +592,14 @@ app.post('/send-campaign', requireAuth, async (req, res) => {
 
       try {
         const result  = await resend.batch.send(emails);
+        // SDK v6 returns { data: { data: [{id},...] } | [{id},...], error }; surface API errors as throws
+        // so the per-recipient log marks the batch as failed instead of silently logging 'sent' with null IDs.
+        if (result?.error) throw new Error(result.error.message || 'Resend batch error');
         // Resend SDK has shipped a few different response shapes over versions:
         //   v0.x → { data: [{id}, ...] }
         //   v2.x → { data: { data: [{id}, ...] }, error: null }
-        // Normalise both so resendId logging works regardless.
+        //   v6.x → { data: [{id}, ...], error: null }
+        // Normalise all so resendId logging works regardless.
         const idsArr  = Array.isArray(result?.data)
           ? result.data
           : Array.isArray(result?.data?.data)
@@ -680,7 +684,8 @@ app.post('/send-test', requireAuth, async (req, res) => {
     const renderedSubject = hasVars ? applyMergeTags(subject,  previewVars, { escape: false }) : subject;
     const renderedBody    = hasVars ? applyMergeTags(bodyHtml, previewVars, { escape: true })  : bodyHtml;
     const html = buildEmailHtml(renderedSubject, renderedBody, 'test');
-    await resend.emails.send({ from: FROM, to: toEmail, subject: `[TEST] ${renderedSubject}`, html });
+    const { error } = await resend.emails.send({ from: FROM, to: toEmail, subject: `[TEST] ${renderedSubject}`, html });
+    if (error) throw new Error(error.message || 'Resend rejected the email');
     res.json({ ok: true, message: `Test email sent to ${toEmail}` });
   } catch (err) {
     console.error('/send-test error:', err);
@@ -734,11 +739,12 @@ app.post('/send-transactional', requireAuth, async (req, res) => {
     if (effectiveReplyTo) payload.replyTo = effectiveReplyTo;
     if (Array.isArray(tags) && tags.length) payload.tags = tags;
 
-    const result = await resend.emails.send(payload);
+    const { data, error } = await resend.emails.send(payload);
+    if (error) throw new Error(error.message || 'Resend rejected the email');
 
     res.json({
       ok: true,
-      id: result?.data?.id || null,
+      id: data?.id || null,
       message: `Sent to ${toEmail}`,
     });
   } catch (err) {
