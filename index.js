@@ -592,7 +592,22 @@ app.post('/send-campaign', requireAuth, async (req, res) => {
 
       try {
         const result  = await resend.batch.send(emails);
-        const idsArr  = Array.isArray(result?.data) ? result.data : [];
+        // Resend SDK has shipped a few different response shapes over versions:
+        //   v0.x → { data: [{id}, ...] }
+        //   v2.x → { data: { data: [{id}, ...] }, error: null }
+        // Normalise both so resendId logging works regardless.
+        const idsArr  = Array.isArray(result?.data)
+          ? result.data
+          : Array.isArray(result?.data?.data)
+            ? result.data.data
+            : [];
+        // Surface a structured log entry so Railway logs make any future
+        // ID-mapping mismatch obvious without needing to redeploy.
+        if (idsArr.length !== batch.length) {
+          console.warn('[send-campaign] Resend batch returned',
+            idsArr.length, 'IDs for', batch.length, 'recipients — response shape:',
+            JSON.stringify(result).slice(0, 400));
+        }
         for (let i = 0; i < batch.length; i++) {
           const r  = batch[i];
           const id = idsArr[i]?.id || null;
@@ -771,14 +786,67 @@ app.get('/campaigns/:id', requireAuth, async (req, res) => {
     const doc = await db.collection('mail_campaigns').doc(req.params.id).get();
     if (!doc.exists) return res.status(404).json({ error: 'Campaign not found' });
     const data = doc.data();
+    // Cap bodyHtml at 500 KB on the wire — large data:image base64 inlines
+    // would otherwise break JSON serialisation on the Express response and
+    // surface as opaque 500s. The full body is still in Firestore for audit;
+    // the modal only needs a preview.
+    const PREVIEW_CAP = 500 * 1024;
+    let bodyHtml = data.bodyHtml || '';
+    let bodyTruncated = false;
+    if (bodyHtml.length > PREVIEW_CAP) {
+      bodyHtml = bodyHtml.slice(0, PREVIEW_CAP);
+      bodyTruncated = true;
+    }
     res.json({
       campaign: {
         id: doc.id,
         ...data,
+        bodyHtml,
+        bodyTruncated,
         createdAt:  data.createdAt?.toDate?.()?.toISOString() || null,
         finishedAt: data.finishedAt?.toDate?.()?.toISOString() || null,
       },
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* ================================================================
+   GET /diag/last-resend-id
+   Diagnostic helper — returns the last N recipient log entries from
+   Firestore so you can quickly check if Resend gave us real message
+   IDs (debugs the "Send Campaign sent but didn't arrive" mystery).
+   Admin-only via the same bearer auth.
+   ================================================================ */
+app.get('/diag/last-resend-id', requireAuth, async (_req, res) => {
+  if (!db) return res.status(500).json({ error: 'Firebase not initialised' });
+  try {
+    const snap = await db.collection('mail_campaigns')
+      .orderBy('createdAt', 'desc')
+      .limit(10)
+      .get();
+    const out = [];
+    for (const d of snap.docs) {
+      const data = d.data();
+      const recips = (data.recipients || []).map(r => ({
+        email: r.email,
+        status: r.status,
+        resendId: r.resendId || null,
+        error: r.error || null,
+      }));
+      out.push({
+        id: d.id,
+        subject: data.subject,
+        sentBy: data.sentBy,
+        status: data.status,
+        sentCount: data.sentCount,
+        failedCount: data.failedCount,
+        createdAt: data.createdAt?.toDate?.()?.toISOString() || null,
+        recipients: recips,
+      });
+    }
+    res.json({ campaigns: out });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
