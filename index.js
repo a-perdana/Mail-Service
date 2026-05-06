@@ -14,10 +14,13 @@ const port = process.env.PORT || 3000;
 // Parse JSON bodies up to 2mb (HTML newsletters can be large)
 app.use(express.json({ limit: '2mb' }));
 
-// CORS — allow only CentralHub origins
+// CORS — allow CentralHub + TeachersHub origins
+// (TeachersHub careers-admin + careers-apply hit /send-transactional)
 const ALLOWED_ORIGINS = [
   'https://centralhub.eduversal.org',
   'https://central-hub.vercel.app',
+  'https://teachershub.eduversal.org',
+  'https://teachers-hub.vercel.app',
   // local dev
   'http://localhost:5500',
   'http://127.0.0.1:5500',
@@ -55,6 +58,9 @@ try {
    ================================================================ */
 const resend = new Resend(process.env.RESEND_API_KEY);
 const FROM   = `${process.env.FROM_NAME || 'Eduversal Education'} <${process.env.FROM_EMAIL || 'secondary.edu@eduversal.org'}>`;
+// Optional fallback Reply-To used by /send-transactional when caller omits it.
+// Empty string = no Reply-To header added.
+const DEFAULT_REPLY_TO = process.env.DEFAULT_REPLY_TO || '';
 
 /* ================================================================
    AUTH MIDDLEWARE
@@ -121,6 +127,102 @@ function buildEmailHtml(subject, bodyHtml, campaignId) {
     <div class="footer">
       <p>You are receiving this email because you are a teacher in the Eduversal network.</p>
       <p>Eduversal Education · Jakarta, Indonesia</p>
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
+/* ================================================================
+   TRANSACTIONAL TEMPLATES
+   Variant-aware HTML wrapper for one-to-one emails (offers, interview
+   invites, application confirmations, etc.). Distinct visual treatment
+   per templateName so candidates can recognise the message type at a
+   glance, but the same brand language as the newsletter wrapper.
+   ================================================================ */
+const TRANSACTIONAL_VARIANTS = {
+  // Defaults — neutral mor/cyan brand (matches Eduversal design system)
+  default: {
+    headerGradient: 'linear-gradient(135deg,#1e3a5f 0%,#0d9488 100%)',
+    accentColor:    '#0d9488',
+    eyebrow:        '',
+  },
+  application_received: {
+    headerGradient: 'linear-gradient(135deg,#1e3a5f 0%,#6c5ce7 100%)',
+    accentColor:    '#6c5ce7',
+    eyebrow:        'Application Received',
+  },
+  interview: {
+    headerGradient: 'linear-gradient(135deg,#1e3a5f 0%,#6c5ce7 100%)',
+    accentColor:    '#6c5ce7',
+    eyebrow:        'Interview Scheduled',
+  },
+  offer: {
+    headerGradient: 'linear-gradient(135deg,#0f766e 0%,#10b981 100%)',
+    accentColor:    '#10b981',
+    eyebrow:        'Offer of Employment',
+  },
+  reject: {
+    headerGradient: 'linear-gradient(135deg,#334155 0%,#64748b 100%)',
+    accentColor:    '#64748b',
+    eyebrow:        'Application Update',
+  },
+};
+
+/**
+ * Build a branded transactional email (one recipient, one purpose).
+ * Distinct from buildEmailHtml() which targets newsletters.
+ */
+function buildTransactionalHtml({ subject, bodyHtml, templateName, footerNote }) {
+  const variant = TRANSACTIONAL_VARIANTS[templateName] || TRANSACTIONAL_VARIANTS.default;
+  const eyebrow = variant.eyebrow
+    ? `<div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:rgba(255,255,255,.85);font-weight:600;margin-bottom:8px">${variant.eyebrow}</div>`
+    : '';
+  const footer = footerNote
+    ? `<p style="margin:0 0 6px">${footerNote}</p>`
+    : `<p style="margin:0 0 6px">This is an automated message from the Eduversal hiring team.</p>`;
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${subject}</title>
+<style>
+  body { margin:0; padding:0; background:#f4f4f5; font-family:'Segoe UI',-apple-system,BlinkMacSystemFont,Arial,sans-serif; }
+  .wrapper { max-width:620px; margin:32px auto; background:#fff; border-radius:12px; overflow:hidden; box-shadow:0 2px 16px rgba(0,0,0,.08); }
+  .header { background:${variant.headerGradient}; padding:32px 40px; }
+  .header-logo { font-size:1.35rem; font-weight:700; color:#fff; letter-spacing:.03em; }
+  .header-logo span { color:rgba(255,255,255,.7); font-weight:500; }
+  .body { padding:36px 40px 28px; color:#1c1c2e; font-size:15px; line-height:1.7; }
+  .body h1, .body h2, .body h3 { color:#0f172a; margin-top:0; }
+  .body a { color:${variant.accentColor}; }
+  .body p { margin:0 0 14px; }
+  .body strong { color:#0f172a; }
+  .body .cta {
+    display:inline-block; padding:12px 22px; background:${variant.accentColor};
+    color:#fff !important; text-decoration:none; border-radius:8px;
+    font-weight:600; margin:8px 0;
+  }
+  .footer { background:#f8fafc; border-top:1px solid #e2e8f0; padding:18px 40px; font-size:12px; color:#94a3b8; text-align:center; }
+  .footer a { color:${variant.accentColor}; text-decoration:none; }
+  @media(max-width:640px) {
+    .header, .body, .footer { padding-left:20px; padding-right:20px; }
+  }
+</style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="header">
+      ${eyebrow}
+      <div class="header-logo">Eduversal <span>Education</span></div>
+    </div>
+    <div class="body">
+      ${bodyHtml}
+    </div>
+    <div class="footer">
+      ${footer}
+      <p style="margin:0">Eduversal Education · Jakarta, Indonesia</p>
     </div>
   </div>
 </body>
@@ -484,6 +586,65 @@ app.post('/send-test', requireAuth, async (req, res) => {
 });
 
 /* ================================================================
+   POST /send-transactional
+   One-to-one branded email (offers, interview invites, application
+   confirmations). Distinct from /send-campaign — no Firestore
+   campaign record, no batching.
+
+   Body:
+   {
+     toEmail:       string                 (required)
+     toName:        string                 (optional, used for "Name <email>")
+     subject:       string                 (required)
+     bodyHtml:      string                 (required — inner HTML, will be wrapped)
+     templateName:  string                 (optional — application_received|interview|offer|reject|default)
+     replyTo:       string                 (optional — falls back to DEFAULT_REPLY_TO env)
+     footerNote:    string                 (optional — overrides default footer line)
+     fromOverride:  string                 (optional — full "Name <email>" for FROM)
+     tags:          { name, value }[]      (optional — Resend tags for analytics)
+   }
+   ================================================================ */
+app.post('/send-transactional', requireAuth, async (req, res) => {
+  const {
+    toEmail, toName, subject, bodyHtml,
+    templateName = 'default', replyTo, footerNote, fromOverride, tags,
+  } = req.body || {};
+
+  if (!toEmail || typeof toEmail !== 'string' || !toEmail.includes('@')) {
+    return res.status(400).json({ error: 'toEmail is required and must be a valid address' });
+  }
+  if (!subject || !subject.trim())   return res.status(400).json({ error: 'subject is required' });
+  if (!bodyHtml || !bodyHtml.trim()) return res.status(400).json({ error: 'bodyHtml is required' });
+
+  try {
+    const html = buildTransactionalHtml({ subject, bodyHtml, templateName, footerNote });
+    const effectiveReplyTo = (typeof replyTo === 'string' && replyTo.includes('@'))
+      ? replyTo
+      : DEFAULT_REPLY_TO;
+
+    const payload = {
+      from:    fromOverride || FROM,
+      to:      toName ? `${toName} <${toEmail}>` : toEmail,
+      subject,
+      html,
+    };
+    if (effectiveReplyTo) payload.replyTo = effectiveReplyTo;
+    if (Array.isArray(tags) && tags.length) payload.tags = tags;
+
+    const result = await resend.emails.send(payload);
+
+    res.json({
+      ok: true,
+      id: result?.data?.id || null,
+      message: `Sent to ${toEmail}`,
+    });
+  } catch (err) {
+    console.error('/send-transactional error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* ================================================================
    GET /campaigns
    Returns recent campaigns list (last 50)
    ================================================================ */
@@ -512,4 +673,5 @@ app.get('/campaigns', requireAuth, async (req, res) => {
 app.listen(port, () => {
   console.log(`Eduversal Mail Service running on port ${port}`);
   console.log(`FROM: ${FROM}`);
+  console.log(`DEFAULT_REPLY_TO: ${DEFAULT_REPLY_TO || '(none)'}`);
 });
