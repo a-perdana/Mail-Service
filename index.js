@@ -548,44 +548,61 @@ app.post('/send-campaign', requireAuth, async (req, res) => {
   // Background sending
   (async () => {
     // Pre-build the non-personalized HTML once; per-recipient path re-renders inside the loop.
-    const baseHtml  = perMap ? null : buildEmailHtml(subject, bodyHtml, campaignRef.id);
-    const batches   = chunk(recipients, 50);
-    let sentCount   = 0;
-    let failedCount = 0;
+    const baseHtml   = perMap ? null : buildEmailHtml(subject, bodyHtml, campaignRef.id);
+    const batches    = chunk(recipients, 50);
+    let sentCount    = 0;
+    let failedCount  = 0;
+    // Per-recipient delivery log. Stores email + name + status only — never field values.
+    // Resend batch.send returns one id per email in input order, so we can map each id back.
+    const recipientLog = [];
 
     for (const batch of batches) {
-      try {
-        const emails = batch.map(r => {
-          let renderedSubject = subject;
-          let renderedHtml    = baseHtml;
-          if (perMap) {
-            const vars = perMap[r.email.toLowerCase()] || null;
-            // Per-recipient: substitute into subject (plain) + body (HTML-escape values), then wrap.
-            renderedSubject = applyMergeTags(subject,  vars, { escape: false });
-            renderedHtml    = buildEmailHtml(
-              renderedSubject,
-              applyMergeTags(bodyHtml, vars, { escape: true }),
-              campaignRef.id
-            );
-          }
-          return {
-            from:    FROM,
-            to:      r.name ? `${r.name} <${r.email}>` : r.email,
-            subject: renderedSubject,
-            html:    renderedHtml,
-          };
-        });
-
-        const result = await resend.batch.send(emails);
-
-        // Count successes / failures
-        if (result?.data) {
-          sentCount += result.data.length;
-        } else {
-          sentCount += batch.length;
+      const emails = batch.map(r => {
+        let renderedSubject = subject;
+        let renderedHtml    = baseHtml;
+        if (perMap) {
+          const vars = perMap[r.email.toLowerCase()] || null;
+          // Per-recipient: substitute into subject (plain) + body (HTML-escape values), then wrap.
+          renderedSubject = applyMergeTags(subject,  vars, { escape: false });
+          renderedHtml    = buildEmailHtml(
+            renderedSubject,
+            applyMergeTags(bodyHtml, vars, { escape: true }),
+            campaignRef.id
+          );
         }
+        return {
+          from:    FROM,
+          to:      r.name ? `${r.name} <${r.email}>` : r.email,
+          subject: renderedSubject,
+          html:    renderedHtml,
+        };
+      });
+
+      try {
+        const result  = await resend.batch.send(emails);
+        const idsArr  = Array.isArray(result?.data) ? result.data : [];
+        for (let i = 0; i < batch.length; i++) {
+          const r  = batch[i];
+          const id = idsArr[i]?.id || null;
+          recipientLog.push({
+            email:  r.email,
+            name:   r.name || '',
+            status: 'sent',
+            resendId: id,
+          });
+        }
+        sentCount += batch.length;
       } catch (batchErr) {
-        console.error('Batch send error:', batchErr.message);
+        const errMsg = batchErr?.message || 'Batch send error';
+        console.error('Batch send error:', errMsg);
+        for (const r of batch) {
+          recipientLog.push({
+            email:  r.email,
+            name:   r.name || '',
+            status: 'failed',
+            error:  errMsg.slice(0, 200), // cap to keep doc size sane
+          });
+        }
         failedCount += batch.length;
       }
 
@@ -594,12 +611,22 @@ app.post('/send-campaign', requireAuth, async (req, res) => {
     }
 
     // ── 4. Update campaign record ──────────────────────────────
-    await campaignRef.update({
+    // Firestore single-doc field cap is 1 MiB. Each recipient entry is <200 bytes,
+    // so ~5000 recipients fit. For safety we cap at 2000 — beyond that the per-recipient
+    // log is dropped (count fields still reflect totals so the UI degrades gracefully).
+    const RECIPIENTS_LOG_CAP = 2000;
+    const update = {
       sentCount,
       failedCount,
       status:   failedCount === 0 ? 'sent' : failedCount === recipients.length ? 'failed' : 'partial',
       finishedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
+    };
+    if (recipientLog.length <= RECIPIENTS_LOG_CAP) {
+      update.recipients = recipientLog;
+    } else {
+      update.recipientsTruncated = true;
+    }
+    await campaignRef.update(update);
 
     console.log(`Campaign ${campaignRef.id}: sent=${sentCount} failed=${failedCount}`);
   })().catch(err => {
@@ -704,13 +731,42 @@ app.get('/campaigns', requireAuth, async (req, res) => {
       .orderBy('createdAt', 'desc')
       .limit(50)
       .get();
-    const campaigns = snap.docs.map(d => ({
-      id: d.id,
-      ...d.data(),
-      createdAt:  d.data().createdAt?.toDate?.()?.toISOString() || null,
-      finishedAt: d.data().finishedAt?.toDate?.()?.toISOString() || null,
-    }));
+    // List view: strip the per-recipient log + bodyHtml to keep response small.
+    // Full detail comes from GET /campaigns/:id.
+    const campaigns = snap.docs.map(d => {
+      const data = d.data();
+      const { recipients, bodyHtml, ...rest } = data;
+      return {
+        id: d.id,
+        ...rest,
+        createdAt:  data.createdAt?.toDate?.()?.toISOString() || null,
+        finishedAt: data.finishedAt?.toDate?.()?.toISOString() || null,
+      };
+    });
     res.json({ campaigns });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* ================================================================
+   GET /campaigns/:id
+   Full campaign detail (recipients list + body HTML preview).
+   ================================================================ */
+app.get('/campaigns/:id', requireAuth, async (req, res) => {
+  if (!db) return res.status(500).json({ error: 'Firebase not initialised' });
+  try {
+    const doc = await db.collection('mail_campaigns').doc(req.params.id).get();
+    if (!doc.exists) return res.status(404).json({ error: 'Campaign not found' });
+    const data = doc.data();
+    res.json({
+      campaign: {
+        id: doc.id,
+        ...data,
+        createdAt:  data.createdAt?.toDate?.()?.toISOString() || null,
+        finishedAt: data.finishedAt?.toDate?.()?.toISOString() || null,
+      },
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
