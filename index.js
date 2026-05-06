@@ -124,8 +124,16 @@ function buildEmailHtml(subject, bodyHtml, campaignId) {
   .header  { background:linear-gradient(135deg,#1e3a5f 0%,#0d9488 100%); padding:32px 40px; }
   .header-logo { font-size:1.35rem; font-weight:700; color:#fff; letter-spacing:.03em; }
   .header-logo span { color:#5eead4; }
-  .body    { padding:36px 40px 28px; color:#1c1c2e; font-size:15px; line-height:1.7; }
-  .body h1,.body h2,.body h3 { color:#0f172a; }
+  .body    { padding:36px 40px 28px; color:#1c1c2e; font-size:15px; line-height:1.6; }
+  .body p  { margin:0 0 12px; }
+  .body p:last-child { margin-bottom:0; }
+  /* Quill emits empty paragraphs as <p><br></p> when the user hits Enter on a blank
+     line. Without this, every empty paragraph stacks a full line-height + margin
+     and the message looks double-spaced. Halve their visual weight. */
+  .body p > br:only-child { line-height:0.6; }
+  .body h1,.body h2,.body h3 { color:#0f172a; margin:18px 0 8px; }
+  .body ul, .body ol { margin:0 0 12px; padding-left:22px; }
+  .body li { margin-bottom:4px; }
   .body a  { color:#0d9488; }
   .body img { max-width:100%; border-radius:8px; }
   .footer  { background:#f8fafc; border-top:1px solid #e2e8f0; padding:20px 40px; font-size:12px; color:#94a3b8; text-align:center; }
@@ -213,10 +221,14 @@ function buildTransactionalHtml({ subject, bodyHtml, templateName, footerNote })
   .header { background:${variant.headerGradient}; padding:32px 40px; }
   .header-logo { font-size:1.35rem; font-weight:700; color:#fff; letter-spacing:.03em; }
   .header-logo span { color:rgba(255,255,255,.7); font-weight:500; }
-  .body { padding:36px 40px 28px; color:#1c1c2e; font-size:15px; line-height:1.7; }
-  .body h1, .body h2, .body h3 { color:#0f172a; margin-top:0; }
+  .body { padding:36px 40px 28px; color:#1c1c2e; font-size:15px; line-height:1.6; }
+  .body h1, .body h2, .body h3 { color:#0f172a; margin:18px 0 8px; }
   .body a { color:${variant.accentColor}; }
-  .body p { margin:0 0 14px; }
+  .body p { margin:0 0 12px; }
+  .body p:last-child { margin-bottom:0; }
+  .body p > br:only-child { line-height:0.6; }
+  .body ul, .body ol { margin:0 0 12px; padding-left:22px; }
+  .body li { margin-bottom:4px; }
   .body strong { color:#0f172a; }
   .body .cta {
     display:inline-block; padding:12px 22px; background:${variant.accentColor};
