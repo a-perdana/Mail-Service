@@ -121,9 +121,11 @@ function buildEmailHtml(subject, bodyHtml, campaignId) {
 <style>
   body { margin:0; padding:0; background:#f4f4f5; font-family:'Segoe UI',Arial,sans-serif; }
   .wrapper { max-width:620px; margin:32px auto; background:#fff; border-radius:12px; overflow:hidden; box-shadow:0 2px 16px rgba(0,0,0,.08); }
-  .header  { background:linear-gradient(135deg,#1e3a5f 0%,#0d9488 100%); padding:32px 40px; }
-  .header-logo { font-size:1.35rem; font-weight:700; color:#fff; letter-spacing:.03em; }
-  .header-logo span { color:#5eead4; }
+  .header  { background:linear-gradient(135deg,#1e3a5f 0%,#0d9488 100%); padding:28px 40px; }
+  .header-logo { display:flex; align-items:center; gap:14px; }
+  .header-logo img { display:block; height:30px; width:auto; }
+  .header-logo .divider { display:inline-block; width:1px; height:22px; background:rgba(255,255,255,.28); }
+  .header-logo .sub { color:rgba(255,255,255,.78); font-size:13px; font-weight:500; letter-spacing:.05em; text-transform:uppercase; }
   .body    { padding:36px 40px 28px; color:#1c1c2e; font-size:15px; line-height:1.6; }
   .body p  { margin:0 0 12px; }
   .body p:last-child { margin-bottom:0; }
@@ -146,7 +148,11 @@ function buildEmailHtml(subject, bodyHtml, campaignId) {
 <body>
   <div class="wrapper">
     <div class="header">
-      <div class="header-logo">Eduversal <span>Education</span></div>
+      <div class="header-logo">
+        <img src="https://centralhub.eduversal.org/eduversal-logo-white.png" alt="Eduversal" height="30">
+        <span class="divider"></span>
+        <span class="sub">Education</span>
+      </div>
     </div>
     <div class="body">
       ${bodyHtml}
@@ -218,9 +224,11 @@ function buildTransactionalHtml({ subject, bodyHtml, templateName, footerNote })
 <style>
   body { margin:0; padding:0; background:#f4f4f5; font-family:'Segoe UI',-apple-system,BlinkMacSystemFont,Arial,sans-serif; }
   .wrapper { max-width:620px; margin:32px auto; background:#fff; border-radius:12px; overflow:hidden; box-shadow:0 2px 16px rgba(0,0,0,.08); }
-  .header { background:${variant.headerGradient}; padding:32px 40px; }
-  .header-logo { font-size:1.35rem; font-weight:700; color:#fff; letter-spacing:.03em; }
-  .header-logo span { color:rgba(255,255,255,.7); font-weight:500; }
+  .header { background:${variant.headerGradient}; padding:28px 40px; }
+  .header-logo { display:flex; align-items:center; gap:14px; }
+  .header-logo img { display:block; height:30px; width:auto; }
+  .header-logo .divider { display:inline-block; width:1px; height:22px; background:rgba(255,255,255,.28); }
+  .header-logo .sub { color:rgba(255,255,255,.78); font-size:13px; font-weight:500; letter-spacing:.05em; text-transform:uppercase; }
   .body { padding:36px 40px 28px; color:#1c1c2e; font-size:15px; line-height:1.6; }
   .body h1, .body h2, .body h3 { color:#0f172a; margin:18px 0 8px; }
   .body a { color:${variant.accentColor}; }
@@ -246,7 +254,11 @@ function buildTransactionalHtml({ subject, bodyHtml, templateName, footerNote })
   <div class="wrapper">
     <div class="header">
       ${eyebrow}
-      <div class="header-logo">Eduversal <span>Education</span></div>
+      <div class="header-logo">
+        <img src="https://centralhub.eduversal.org/eduversal-logo-white.png" alt="Eduversal" height="30">
+        <span class="divider"></span>
+        <span class="sub">Education</span>
+      </div>
     </div>
     <div class="body">
       ${bodyHtml}
